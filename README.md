@@ -1,4 +1,4 @@
 nsa-ruby
 ========
 
-Ruby version of Nat Sessio Aggrigator
+Ruby version of Nat Session Aggrigator
