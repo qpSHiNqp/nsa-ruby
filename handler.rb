@@ -8,6 +8,12 @@ CLOSE_REGEXP             = /\bclose\b/i.freeze
 CONTENT_LENGTH_REGEXP    = /^Content-Length:\s+(\d+)/i.freeze
 TRANSFER_ENCODING_REGEXP = /^Transfer-Encoding:\s*(\w+)/i.freeze
 
+#$debug = true.freeze
+#$downstream_count = 0
+#$upstream_count = 0
+#$upstream_conn = Hash.new
+#$m = Mutex.new
+
 class Upstream < EM::Connection
 	attr_reader :mode
 
@@ -18,7 +24,13 @@ class Upstream < EM::Connection
 	end
 
 	def post_init
-		#p "<<< in post_init >>>"
+		reset_vars
+		#if $debug then
+		#	$m.synchronize{ $upstream_count += 1 }
+		#end
+	end
+
+	def reset_vars
 		@content_length = 0
 		@received = 0
 		@chunked = false
@@ -39,6 +51,12 @@ class Upstream < EM::Connection
 		@request_handler.send_data(response)
 	end
 
+	#def send_data(data)
+	#	#print "notice: about to send request through sock: #{$upstream_conn[self.object_id][0]} #{$upstream_conn[self.object_id][2]}\n"
+	#	#print data
+	#	super(data)
+	#end
+
 	def receive_data(data)
 		if @mode == :tunnel then
 			@request_handler.send_data(data)
@@ -51,8 +69,6 @@ class Upstream < EM::Connection
 		if @content_length == 0 && !@chunked then
 			# keep-alive or not
 			header, body = data.split(/\r?\n\r?\n/, 2)
-			#p "==============================="
-			p header
 			http_version, pseudo = header.split(nil, 2)
 			CONNECTION_REGEXP =~ header
 			connection = nil
@@ -61,34 +77,31 @@ class Upstream < EM::Connection
 			# content length
 			CONTENT_LENGTH_REGEXP =~ header
 			@content_length = Regexp.last_match.nil? ? 0 : Regexp.last_match(1).to_i
-			#p "content-length: %s" % @content_length
 
 			# chunked?
 			TRANSFER_ENCODING_REGEXP =~ header
 			@chunked = Regexp.last_match.nil? ? false : true
-			#p "chunked?: %s" % @chunked
 
 			# persistent?
 			@persistent = persistent?(connection, http_version)
 
 			# rewrite connection header
 			data.sub(/Connection: /i, "Proxy-Connection: ") unless connection.nil?
-			p "Connection: %s" % connection
+			#p "Connection_persistency: %s" % @persistent
 		else
 			#p "*** continued ***"
 			body = data
 		end
-		if @chunked then
+		if @chunked && !body.nil? && body.bytesize != 0 then
 			chunk = body
 			while true do
 				chunk_size, message = chunk.split(/\r?\n/, 2)
-				if chunk_size.strip == "0" then
+				if chunk_size.nil? || chunk_size.strip == "0" then
 					chunk_end = true
 					break
 				end
 				chunk_size = chunk_size.hex
-				p "*** (chunk: %d bytes)" % chunk_size
-				p message
+				#p "*** (chunk: %d bytes)" % chunk_size
 				if message.nil? || message.bytesize == 0 then
 					@chunk_received = 0
 					break
@@ -96,33 +109,47 @@ class Upstream < EM::Connection
 					chunk = message.byteslice(chunk_size, message.bytesize - chunk_size)
 					@chunk_received = 0
 				else
-					@chunk_received = @chunk_received + message.bytesize
+					@chunk_received += message.bytesize
 					break
 				end
 			end
 		end
-		#p ">>> body size: %d" % body.bytesize
 
 		# send back response to client
 		@request_handler.send_data(data)
-		@received = @received + body.bytesize
+		@received += body.bytesize unless body.nil?
 
 		if (@received >= @content_length && ! @chunked) || chunk_end then
-			#p "*** finished receive body (chunk_end: %s) ***" % chunk_end
 			# connection: close
 			@request_handler.close_connection_after_writing unless @persistent
-			post_init
+			reset_vars
 		end
 	end
 
-	def unbind(data)
+	def unbind
 		@request_handler.close_connection_after_writing
+		#if $debug then
+		#	$m.synchronize{ $upstream_count -= 1 }
+		#end
+	end
+
+	def connection_completed
+		@request_handler.close_connection_after_writing
+		#if $debug then
+		#	$m.synchronize{ $upstream_count -= 1 }
+		#end
 	end
 end
 
 class RequestHandler < EM::Connection
 	def initialize
 		@upstream = nil
+	end
+
+	def post_init
+		#if $debug then
+		#	$m.synchronize{ $downstream_count += 1 }
+		#end
 	end
 
 	def receive_data(data)
@@ -136,7 +163,6 @@ class RequestHandler < EM::Connection
 		/^(.*)\r?\n/ =~ header
 		request_string = Regexp.last_match(1).strip
 		method, uri, http_version = request_string.split("\s", 3)
-		p request_string
 
 		# parse connection header
 		PROXY_CONNECTION_REGEXP =~ header
@@ -146,6 +172,8 @@ class RequestHandler < EM::Connection
 			# CONNECT method
 			host, port = uri.strip.split(":", 2)
 			@upstream = EM.connect(host, port, Upstream, self)
+			#$m.synchronize { $upstream_conn[@upstream.object_id] = [host, port, :tunnel] }
+			#print "notice: upstream connection established. #{@upstream.object_id.to_s(16)}, #{host}, #{port}\n"
 			# rewrite connection header
 			data.sub(/Proxy-Connection: /i, "Connection: ") unless proxy_connection.nil?
 			# send through upstream socket
@@ -155,6 +183,8 @@ class RequestHandler < EM::Connection
 			if @upstream == nil then
 				uri = URI.parse(uri)
 				@upstream = EM.connect(uri.host, uri.port, Upstream, self)
+			#$m.synchronize { $upstream_conn[@upstream.object_id] = [uri.host, uri.port, :proxy] }
+			#print "notice: upstream connection established. #{@upstream.object_id.to_s(16)}, #{uri.host}, #{uri.port}\n"
 			end
 			# rewrite connection header
 			data.sub(/Proxy-Connection: /i, "Connection: ") if proxy_connection
@@ -165,5 +195,15 @@ class RequestHandler < EM::Connection
 
 	def unbind
 		@upstream.close_connection_after_writing unless @upstream.nil?
+		#if $debug then
+		#	$m.synchronize{ $downstream_count -= 1 }
+		#end
+	end
+
+	def connection_completed
+		@upstream.close_connection_after_writing unless @upstream.nil?
+		#if $debug then
+		#	$m.synchronize{ $downstream_count -= 1 }
+		#end
 	end
 end
