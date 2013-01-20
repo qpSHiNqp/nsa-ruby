@@ -8,10 +8,14 @@
 
 require "socket"
 require "./request_handler"
+require "./response_handler"
+require "./nsa_utils"
 
 LISTEN_PORT = 20000.freeze
 
-class NSAWorker
+class NSAServer
+    include NSAUtils
+
     def initialize(s)
         @downstream_socket = s
         @descriptors = [@downstream_socket]
@@ -22,14 +26,11 @@ class NSAWorker
 
     def run
         loop do
-            s = IO::select(@descriptors)
+            s = select(@descriptors)
             s[0].each do |sock|
                 if sock == @downstream_socket then
                     # dataからidとpayloadを取り出す
-                    data = sock.recv(65536)
-                    id = data.byteslice(0, 2).to_i
-                    payload = data.byteslice(3, data.bytesize - 3)
-
+                    id, flag, payload = unpack_header(sock.recv(65536))
                     # request処理
                     req = RequestHandler.new(payload)
 
@@ -63,8 +64,7 @@ class NSAWorker
                     begin
                         # Response Headerの書き換え
                         # idをつけてNSA Sessionを通じてClientへ流す
-                        @upstream_socket.write @ids[sock.object_id] + "\x00" + sock.recv(65536)
-
+                        @upstream_socket.write pack_header(sock.recv(65536), @ids[sock.object_id])
                         # keep aliveの有無
                     rescue
                         if sock.eof? then
@@ -78,38 +78,10 @@ class NSAWorker
     end # run
 end # class NSAWorker
 
-class NSAServer
-    def initialize(listen_port)
-        @server_socket = TCPServer.open(listen_port)
-        @descriptors = [@server_socket]
-    end # initialize
-
-    def run
-        loop do
-            #s = IO::select(@descriptors)
-            #s[0].each do |sock|
-            #    if sock == @server_socket then
-            #        accept_new_connection
-            #    end
-            #end # each
-            accept_loop(@server_socket) do |sock|
-                fork do
-                    NSAWorker.new(sock).run
-            end
-        end # loop
+# 起動
+server_socket = TCPServer.open(LISTEN_PORT)
+accept_loop(server_socket) do |sock|
+    fork do
+        NSAServer.new(sock).run
     end
-
-    #private
-
-    #def accept_new_connection
-    #    newsock = @server_socket.accept
-    #    #@descriptors.push(newsock)
-    #    fork do
-    #        worker = NSAWorker.new(newsock)
-    #        worker.run
-    #    end
-    #end # accept_new_connection
-end # NSAServer
-
-server = NSAServer.new(LISTEN_PORT)
-server.run
+end
