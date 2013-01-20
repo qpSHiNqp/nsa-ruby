@@ -1,15 +1,4 @@
 # client.rb
-# 起動したら, nsa sessionを確立する
-# ブラウザ接続のためのlisten
-# ブラウザの接続がアレばacceptとfork
-# 1. master process
-#   ソケットをselect
-#   書き込みがあったソケットが子プロセスとのpipeだった場合は, データにdescriptor番号を付加してnsa-serverへ送信
-#   書き込みソケットがnsa-serverとのコネクションだった場合は, descriptor番号を調べて適切な子プロセスのpipeへ書き込み
-# 2. child process
-#   ソケットをselect
-#   書き込みがあったソケットが
-#
 # ┌───────────┬─┬────────┐
 # │desc(2byte)│f│data    │
 # └───────────┴─┴────────┘
@@ -40,16 +29,18 @@ class NSAClient
                     accept_new_connection
                 elsif sock == @upstream_socket then # NSAServerからのresponse
                     # そのままchild processに渡す
-                    data = sock.recv
-                    @ids[data.byteslice(0,2).to_i].write(data)
+                    data = sock.recv(65536)
+                    @ids[data.byteslice(0,2).to_i].write(data.byteslice(3, data.bytesize - 3)
                 else # Browserからのrequest
-                    if sock.eof? then
-                        # disconnected. some procedure
-                        sock.close
-                        @descriptors.delete(sock)
-                    else
+                    begin
                         # session id は接続元port番号
-                        @upstream_socket.write sock.peeraddr[2] + "\x00" + sock.recv
+                        @upstream_socket.write @ids[sock.peeraddr[1]] + "\x00" + sock.recv/65536)
+                    rescue
+                        if sock.eof? then
+                            # disconnected. some procedure
+                            sock.close
+                            @descriptors.delete(sock)
+                        end
                     end
                 end
             end # each
@@ -59,65 +50,11 @@ class NSAClient
     private
 
     def accept_new_connection
-        newsock, sockaddr = @listen_socket.accept
+        newsock = @listen_socket.accept
         @descriptors.push(newsock)
-        @ids[newsock.peeraddr[2] = newsock
+        @ids[newsock.peeraddr[1]] = newsock
     end # accept_new_connection
 end # class NSAClient
 
 nsa_client = NSAClient.new(SERVER_ADDR, SERVER_PORT, PROXY_PORT)
 nsa_client.run
-
-#pipes = {}
-#
-#sock_up = TCPSocket.open(SERVER_ADDR, SERVER_PORT)
-#
-#sock_listen = TCPServer.open(PROXY_PORT)
-#
-#socks = [sock_up, sock_listen]
-#
-#loop do
-#    s = IO::select(socks)
-#    s[0].each do |sock|
-#        if sock === sock_listen then
-#            # connection request. fork child process
-#            client = sock_listen.accept
-#            c_out, s_in = IO.pipe
-#            s_out, c_in = IO.pipe
-#            socks.push(s_out)
-#
-#            pid = fork do
-#                client_id = pid
-#                s = IO::select([c_out, client])
-#                s[0].each do |sock|
-#                    if sock === client then
-#                        # ブラウザからのwriteは, session descriptorとflag byteを付加してserverへ送信
-#                        data = sock.recv
-#                        data = client_id.to_s + "\x00" + data
-#                        sock_up.write(data)
-#                    else
-#                        # pipeに対するIOは, descriptorとflag byteを取り除いてブラウザへ送信
-#                        data = sock.recv
-#                        data = data.byteslice(3, data.bytesize - 3)
-#                        client.write(data)
-#                    end
-#                end
-#            end
-#            pipes[pid] = [s_in, s_out]
-#
-#        elsif sock === sock_up then
-#            # descriptorを解析して, そのdescriptorで示されるs_inにdataを書き込む.
-#            payload = sock.recv
-#            desc = payload.byteslice(0, 2)
-#            desc = desc.to_i
-#            pipes[desc][0].write(payload)
-#            # flagによってはprocessをkillし, pipeを破棄する
-#        else
-#            # そのままserverへpayloadをパスする
-#            sock_up.write sock.recv
-#        end
-#    end
-#end
-#
-#sock_listen.close
-#sock_up.close
