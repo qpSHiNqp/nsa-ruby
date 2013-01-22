@@ -10,6 +10,8 @@
 require "socket"
 require "./nsa_utils"
 
+DEBUG = true.freeze
+
 SERVER_ADDR = "127.0.0.1".freeze
 SERVER_PORT = 20000.freeze
 PROXY_PORT = 8080.freeze
@@ -19,6 +21,7 @@ class NSAClient
 
     def initialize(server_addr, server_port, listen_port)
         @upstream_socket = TCPSocket.open(server_addr, server_port)
+        print "Established NSA Session to server: #{@upstream_socket.peeraddr[2]}\n"
         @listen_socket = TCPServer.open(listen_port)
         @descriptors = [@upstream_socket, @listen_socket]
         @ids = Hash.new
@@ -26,7 +29,7 @@ class NSAClient
 
     def run
         loop do
-            s = select(@descriptors)
+            s = IO::select(@descriptors)
             s[0].each do |sock|
                 if sock == @listen_socket then # 新しい接続要求
                     accept_new_connection
@@ -34,16 +37,27 @@ class NSAClient
                     id, flag, payload = unpack_header(sock.recv(65536))
                     @ids[id].write(payload)
                 else # Browserからのrequest
+                    print "Info: Received data from browser\n" if DEBUG
+                    payload = ""
                     begin
                         # session id は接続元port番号
-                        @upstream_socket.write pack_header(sock.recv(65536), @ids[sock.peeraddr[1]])
+                        payload = sock.recv(65536)
                     rescue
+                        print "Info: Recv failed\n" if DEBUG
                         if sock.eof? then
                             # disconnected. some procedure
-                            sock.close
-                            @descriptors.delete(sock)
+                            unsubscribe_connection sock
+                            next
                         end
                     end
+                    if payload.strip.bytesize == 0 then
+                        if sock.eof? then
+                            unsubscribe_connection sock
+                        end
+                        next
+                    end
+
+                    @upstream_socket.write pack_header(payload, sock.peeraddr[1])
                 end
             end # each
         end # loop
@@ -55,8 +69,13 @@ class NSAClient
         newsock = @listen_socket.accept
         @descriptors.push(newsock)
         @ids[newsock.peeraddr[1]] = newsock
+        print "accepted new connection from #{newsock.peeraddr[2]}\n" if DEBUG
     end # accept_new_connection
+
+    def unsubscribe_connection(sock)
+        sock.close
+        @descriptors.delete(sock)
+    end # unsubscribe_connection
 end # class NSAClient
 
-nsa_client = NSAClient.new(SERVER_ADDR, SERVER_PORT, PROXY_PORT)
-nsa_client.run
+NSAClient.new(SERVER_ADDR, SERVER_PORT, PROXY_PORT).run
