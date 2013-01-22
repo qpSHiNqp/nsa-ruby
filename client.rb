@@ -31,10 +31,13 @@ class NSAClient
         loop do
             s = IO::select(@descriptors)
             s[0].each do |sock|
-                if sock == @listen_socket then # 新しい接続要求
+                case sock
+                when @listen_socket
                     accept_new_connection
-                elsif sock == @upstream_socket then # NSAServerからのresponse
-                    id, flag, payload = unpack_header(sock.recv(65536))
+                when @upstream_socket # NSAServerからのresponse
+                    data = sock.recv(65536)
+                    reconnect(sock) unless alive_check sock, data
+                    id, flag, payload = unpack_header(data)
                     @ids[id].write(payload)
                 else # Browserからのrequest
                     print "Info: Received data from browser\n" if DEBUG
@@ -44,18 +47,9 @@ class NSAClient
                         payload = sock.recv(65536)
                     rescue
                         print "Info: Recv failed\n" if DEBUG
-                        if sock.eof? then
-                            # disconnected. some procedure
-                            unsubscribe_connection sock
-                            next
-                        end
+                        next unless alive_check(sock, payload)
                     end
-                    if payload.strip.bytesize == 0 then
-                        if sock.eof? then
-                            unsubscribe_connection sock
-                        end
-                        next
-                    end
+                    next unless alive_check sock, payload
 
                     @upstream_socket.write pack_header(payload, sock.peeraddr[1])
                 end
@@ -63,7 +57,19 @@ class NSAClient
         end # loop
     end # run
 
+    def stop
+        @descriptors.each do |s|
+            s.close
+        end
+    end # stop
+
     private
+
+    def reconnect(sock)
+        @descriptors.delete(sock)
+        sock = TCPSocket.open(sock.peeraddr[2], sock.peeraddr[1])
+        @descriptors.push(sock)
+    end
 
     def accept_new_connection
         newsock = @listen_socket.accept
@@ -78,4 +84,10 @@ class NSAClient
     end # unsubscribe_connection
 end # class NSAClient
 
-NSAClient.new(SERVER_ADDR, SERVER_PORT, PROXY_PORT).run
+#################
+# startup
+#################
+worker = NSAClient.new(SERVER_ADDR, SERVER_PORT, PROXY_PORT)
+Signal.trap("INT") { worker.stop }
+Signal.trap("TERM") { worker.stop }
+worker.run

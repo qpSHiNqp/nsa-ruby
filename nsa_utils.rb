@@ -10,4 +10,13 @@ module NSAUtils
             data.byteslice(3, data.bytesize - 3)
         ]
     end
+
+    def alive_check (sock, data)
+        if sock.eof? then
+            unsubscribe_connection sock
+            return false
+        end
+        return false if data.bytesize == 0
+        return true
+    end
 end
