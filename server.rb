@@ -36,20 +36,21 @@ class NSAServer
 
                     if data.length == 0 then
                         # disconnected. termination process
+                        _log "Downstream connection lost\n"
                         self.stop
                         next
                     end
 
                     id, flag, payload = unpack_header(data)
                     if flag == "\x10" then
-                        unsubscribe_connection(@upstream_sockets[id][0], true) unless @upstream_sockets[id].nil?
-                        next if payload.bytesize == 0
+                        graceful_close(@upstream_sockets[id][0]) unless @upstream_sockets[id].nil?
                     end
 
                     if @is_tunnel[id] == :tunnel then
                         @upstream_sockets[id][0].write payload
                         next
                     end
+                    next if payload.bytesize == 0
 
                     # request処理
                     req = RequestHandler.new(payload)
@@ -94,11 +95,18 @@ class NSAServer
                     _log "Received response from origin server\n"
                     payload = sock.recv(65536)
                     if payload.length == 0 then
+                        _log "Closed connection to origin server: #{sock}\n"
                         unsubscribe_connection sock
                         next
                     end
+
+                    id = @ids[sock.__id__]
+                    if @is_tunnel[id] == :tunnel then
+                        @downstream_socket.write pack_header(payload, id)
+                        next
+                    end
                     res = ResponseHandler.new(payload)
-                    @downstream_socket.write pack_header(res.proxy_rewrite, @ids[sock.__id__])
+                    @downstream_socket.write pack_header(res.proxy_rewrite, id)
                 end
             end # each
         end # loop
@@ -117,27 +125,31 @@ class NSAServer
 
     private
 
-    def unsubscribe_connection(sock, shutdown=false)
-        if shutdown then
+    def graceful_close(sock)
+        if sock then
+            _log "Shutdown connection: #{@ids[sock.__id__]}\n"
             sock.shutdown
-        else
-            @descriptors.delete(sock)
-            if sock == @downstream_socket then
-                @descriptors.each do |s|
-                    s.shutdown
-                end
-                @descriptors.delete(sock)
-                @downstream_socket = nil
-            else
-                id = @ids[sock.__id__]
-                @ids.delete(sock.__id__)
-                @is_tunnel.delete(id)
-                @upstream_sockets.delete(id)
-                # shutdown signalを送信
-                @downstream_socket.write(pack_header("", id, "\x10")) unless @downstream_socket.nil?
-            end
-            sock.close
         end
+    end
+
+    def unsubscribe_connection(sock)
+        @descriptors.delete(sock)
+        if sock == @downstream_socket then
+            @descriptors.each do |s|
+                s.shutdown
+            end
+            @descriptors.delete(sock)
+            @downstream_socket = nil
+        else
+            id = @ids[sock.__id__]
+            _log "Closing connection: #{id}\n"
+            @ids.delete(sock.__id__)
+            @is_tunnel.delete(id)
+            @upstream_sockets.delete(id)
+            # shutdown signalを送信
+            @downstream_socket.write(pack_header("", id, "\x10")) unless @downstream_socket.nil?
+        end
+        sock.close
         exit if @descriptors.length == 0
     end # unsubscribe_connection
 end # class NSAWorker
@@ -146,16 +158,16 @@ end # class NSAWorker
 # 起動
 ###################
 processes = Array.new
-Signal.trap("INT") do
-    processes.each do |p|
-        Process.kill "INT", p
-    end
-end
-Signal.trap("TERM") do
-    processes.each do |p|
-        Process.kill "TERM", p
-    end
-end
+#Signal.trap("INT") do
+#    processes.each do |p|
+#        Process.kill "INT", p
+#    end
+#end
+#Signal.trap("TERM") do
+#    processes.each do |p|
+#        Process.kill "TERM", p
+#    end
+#end
 server_socket = TCPServer.open(LISTEN_PORT)
 Socket.accept_loop(server_socket) do |sock|
     _log "Accepted new client connection from #{sock.peeraddr[2]}\n"
