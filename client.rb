@@ -10,8 +10,6 @@
 require "socket"
 require "./nsa_utils"
 
-DEBUG = true.freeze
-
 SERVER_ADDR = "127.0.0.1".freeze
 SERVER_PORT = 20000.freeze
 PROXY_PORT = 8080.freeze
@@ -21,7 +19,7 @@ class NSAClient
 
     def initialize(server_addr, server_port, listen_port)
         @upstream_socket = TCPSocket.open(server_addr, server_port)
-        print "Established NSA Session to server: #{@upstream_socket.peeraddr[2]}\n"
+        _log "Established NSA Session to server: #{@upstream_socket.peeraddr[2]}\n"
         @listen_socket = TCPServer.open(listen_port)
         @descriptors = [@upstream_socket, @listen_socket]
         @ids = Hash.new
@@ -36,22 +34,22 @@ class NSAClient
                     accept_new_connection
                 when @upstream_socket # NSAServerからのresponse
                     data = sock.recv(65536)
-                    reconnect(sock) unless alive_check sock, data
+                    reconnect(sock) if data.length == 0
                     id, flag, payload = unpack_header(data)
-                    @ids[id].write(payload)
+                    @ids[id].write(payload) unless payload.bytesize == 0
+                    unsubscribe_connection(@ids[id], true) if flag == "\x10"
                 else # Browserからのrequest
-                    print "Info: Received data from browser\n" if DEBUG
-                    payload = ""
-                    begin
-                        # session id は接続元port番号
-                        payload = sock.recv(65536)
-                    rescue
-                        print "Info: Recv failed\n" if DEBUG
-                        next unless alive_check(sock, payload)
+                    _log "Received data from browser\n"
+                    # session id は接続元port番号
+                    payload = sock.recv(65536)
+                    if payload.length == 0 then
+                        # connection is closed by the browser
+                        unsubscribe_connection(sock)
+                        next
                     end
-                    next unless alive_check sock, payload
 
                     @upstream_socket.write pack_header(payload, sock.peeraddr[1])
+                    _log "sent request to server\n"
                 end
             end # each
         end # loop
@@ -66,8 +64,10 @@ class NSAClient
     private
 
     def reconnect(sock)
+        host, port = sock.peeraddr[2], sock.peeraddr[1]
         @descriptors.delete(sock)
-        sock = TCPSocket.open(sock.peeraddr[2], sock.peeraddr[1])
+        sock.close
+        sock = TCPSocket.open(host, port)
         @descriptors.push(sock)
     end
 
@@ -75,12 +75,19 @@ class NSAClient
         newsock = @listen_socket.accept
         @descriptors.push(newsock)
         @ids[newsock.peeraddr[1]] = newsock
-        print "accepted new connection from #{newsock.peeraddr[2]}\n" if DEBUG
+        _log "accepted new connection from #{newsock.peeraddr[2]}\n"
     end # accept_new_connection
 
-    def unsubscribe_connection(sock)
-        sock.close
-        @descriptors.delete(sock)
+    def unsubscribe_connection(sock, shutdown=false)
+        if shutdown then
+            sock.shutdown unless sock.closed? || sock.eof?
+        else
+            if sock != @upstream_socket then
+                @upstream_socket.write pack_header("", (sock.peeraddr)[1], "\x10")
+            end
+            sock.close
+            @descriptors.delete(sock)
+        end
     end # unsubscribe_connection
 end # class NSAClient
 

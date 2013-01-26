@@ -11,12 +11,7 @@ module NSAUtils
         ]
     end
 
-    def alive_check (sock, data)
-        if sock.eof? then
-            unsubscribe_connection sock
-            return false
-        end
-        return false if data.bytesize == 0
-        return true
+    def _log(msg, prefix="Info", dst=STDERR)
+        dst.puts(prefix + ": " + msg)
     end
 end
