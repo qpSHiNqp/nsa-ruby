@@ -11,7 +11,8 @@ module NSAUtils
         ]
     end
 
-    def _log(msg, prefix="Info", dst=STDERR)
-        dst.puts(prefix + ": " + msg)
-    end
+end
+
+def _log(msg, prefix="Info", dst=STDERR)
+    dst.puts(prefix + ": " + msg)
 end

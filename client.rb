@@ -10,7 +10,7 @@
 require "socket"
 require "./nsa_utils"
 
-SERVER_ADDR = "127.0.0.1".freeze
+SERVER_ADDR = "tanaka.hongo.wide.ad.jp".freeze
 SERVER_PORT = 20000.freeze
 PROXY_PORT = 8080.freeze
 
