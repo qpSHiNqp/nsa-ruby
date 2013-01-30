@@ -24,6 +24,7 @@ class NSAClient
         @descriptors = [@upstream_socket, @listen_socket]
         @ports = Hash.new
         @ids = Hash.new
+        @state = Hash.new
     end # initialize
 
     def run
@@ -34,23 +35,23 @@ class NSAClient
                 when @listen_socket
                     accept_new_connection
                 when @upstream_socket # NSAServerからのresponse
+                    _log "Received response from server"
                     data = sock.recv(65536)
                     reconnect(sock) if data.length == 0
                     id, flag, payload = unpack_header(data)
                     @ids[id].write(payload) unless payload.bytesize == 0 || @ids[id].nil?
-                    graceful_close(@ids[id]) if flag == "\x10" unless @ids[id].nil?
+                    graceful_close(@ids[id]) if flag == "\x10" && !@ids[id].nil?
                 else # Browserからのrequest
                     _log "Received data from browser\n"
                     # session id は接続元port番号
-                    payload = sock.recv(65536)
+                    begin
+                        payload = sock.recv(65536)
+                    rescue Errno::ECONNRESET
+                        unsubscribe_connection sock
+                    end
                     if payload.length == 0 then
                         # connection is closed by the browser
-                        id = @ports[sock]
-                        _log "Closed connection to browser: #{id}\n"
-                        @upstream_socket.write pack_header("", id, "\x10")
-                        @ids.delete(id)
-                        @descriptors.delete(sock)
-                        sock.close
+                        unsubscribe_connection sock
                         next
                     end
 
@@ -70,16 +71,39 @@ class NSAClient
 
     private
 
+    def unsubscribe_connection(sock)
+        id = @ports[sock]
+        _log "Closed connection to browser: #{id}\n"
+        if @state[id] == :half_close then
+            @state.delete(id)
+        else
+            @state[id] = :half_close
+            @upstream_socket.write pack_header("", id, "\x10")
+        end
+        @ids.delete(id)
+        @descriptors.delete(sock)
+        sock.close
+    end
+
     def graceful_close(sock)
+        _log "closing connection"
+        id = @ports[sock]
         begin
-            sock.shutdown
+            if @state[id] == :half_close then
+                @state.delete(id)
+            else
+                sock.shutdown
+                @state[id] = :half_close
+            end
         rescue
             _log "Connection is already closed", "Warn"
         end
     end
 
     def reconnect(sock)
-        host, port = sock.peeraddr[2], sock.peeraddr[1]
+        _log "Reconnecting to server"
+        peeraddr = sock.getpeername
+        host, port = peeraddr[0], peeraddr[1].to_i
         @descriptors.delete(sock)
         sock.close
         sock = TCPSocket.open(host, port)
@@ -89,9 +113,12 @@ class NSAClient
     def accept_new_connection
         newsock = @listen_socket.accept
         @descriptors.push(newsock)
-        @ports[newsock] = newsock.peeraddr[1]
-        @ids[newsock.peeraddr[1]] = newsock
-        _log "accepted new connection from #{newsock.peeraddr[2]}\n"
+        peeraddr = newsock.getpeername
+        id = peeraddr[1].to_i
+        @ports[newsock] = id
+        @ids[id] = newsock
+        @state[id] = :established
+        _log "accepted new connection from #{peeraddr[0]}\n"
     end # accept_new_connection
 
 end # class NSAClient

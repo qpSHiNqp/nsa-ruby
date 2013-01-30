@@ -22,6 +22,7 @@ class NSAServer
         @ids = Hash.new # upstram_socketからidを引く
         @upstream_sockets = Hash.new # idからupstream_socketを引く
         @is_tunnel = Hash.new # idからconnection modeを引く
+        @state = Hash.new
     end # initialize
 
     def run
@@ -93,7 +94,11 @@ class NSAServer
 
                 else # from Origin Server
                     _log "Received response from origin server\n"
-                    payload = sock.recv(65536)
+                    begin
+                        payload = sock.recv(65536)
+                    rescue Errno::ECONNRESET
+                        unsubscribe_connection sock
+                    end
                     if payload.length == 0 then
                         _log "Closed connection to origin server: #{sock}\n"
                         unsubscribe_connection sock
@@ -117,6 +122,7 @@ class NSAServer
             begin
                 s.shutdown
             rescue Errno::ENOTCONN
+                _log "socket #{s} already disconnected"
                 @descriptors.delete(s)
                 s.close
             end
@@ -128,7 +134,19 @@ class NSAServer
     def graceful_close(sock)
         if sock then
             _log "Shutdown connection: #{@ids[sock.__id__]}\n"
-            sock.shutdown
+            id = @ids[sock.__id__]
+            if @state[id] == :half_close then
+                @state.delete(id)
+            else
+                begin
+                    sock.shutdown
+                rescue Errno::ENOTCONN
+                    _log "socket #{sock} already disconnected"
+                    @descriptors.delete(sock)
+                    sock.close
+                end
+                @state[id] = :half_close
+            end
         end
     end
 
@@ -143,11 +161,16 @@ class NSAServer
         else
             id = @ids[sock.__id__]
             _log "Closing connection: #{id}\n"
+            if @state[id] == :half_close then
+                @state.delete(id)
+            else
+                @state[id] = :half_close
+            end
+            @downstream_socket.write(pack_header("", id, "\x10")) unless @downstream_socket.nil?
             @ids.delete(sock.__id__)
             @is_tunnel.delete(id)
             @upstream_sockets.delete(id)
             # shutdown signalを送信
-            @downstream_socket.write(pack_header("", id, "\x10")) unless @downstream_socket.nil?
         end
         sock.close
         exit if @descriptors.length == 0
