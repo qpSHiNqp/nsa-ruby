@@ -1,181 +1,75 @@
-# server.rb
-# ┌───────────┬─┬────────┐
-# │desc(2byte)│f│data    │
-# └───────────┴─┴────────┘
-# graceful close flag(0x001)が1ならば, requestキューが空の場合はコネクションをcloseしようとする
-# forceful close flag(0x010)が1ならば, 強制的にコネクションclose
-# response complete flag(0x100)が1ならば, requestキューから1つpopする
-
 require "socket"
-require "./request_handler"
-require "./response_handler"
 require "./nsa_utils"
 
-LISTEN_PORT = 20000.freeze
+class Session
+    attr_accessor :sock
+    attr_reader :host
+    attr_reader :port
+    attr_reader :id
 
-class NSAServer
+    def initialize(sock)
+        @sock = sock
+    end
+end
+
+class NSAWorker
     include NSAUtils
 
-    def initialize(s)
-        @downstream_socket = s
-        @descriptors = [@downstream_socket]
-        @ids = Hash.new # upstram_socketからidを引く
-        @upstream_sockets = Hash.new # idからupstream_socketを引く
-        @is_tunnel = Hash.new # idからconnection modeを引く
-    end # initialize
+    def initialize(sock)
+        @req = Parser.new
+        @down_sock = sock
+        @socks = [sock]
+    end
 
     def run
         loop do
-            s = IO::select(@descriptors)
+            s = select(@socks)
             s[0].each do |sock|
                 case sock
-                when @downstream_socket
-                    _log "Received data from client\n"
-                    # dataからidとpayloadを取り出す
+                when @down_sock
+                    # request from browser
                     data = sock.recv(65536)
-
-                    if data.length == 0 then
-                        # disconnected. termination process
-                        _log "Downstream connection lost\n"
-                        self.stop
+                    if data.bytesize == 0 then
+                        stop
                         next
                     end
-
-                    id, flag, payload = unpack_header(data)
+                    id, flag, data = unpack_header(data)
+                    @req.parse(data)
+                    sess = @sessions[id]
+                    if sess.nil? then
+                        establish_new_session(sock, id, @req.host, @req.port)
+                    elsif sess.host != @req.host || sess.port != @req.port then
+                        update_session(sock, id, @req.host, @req.port)
+                    end
+                    sess.sock.write @req.rewrite unless payload.bytesize == 0
                     if flag == "\x10" then
-                        graceful_close(@upstream_sockets[id][0]) unless @upstream_sockets[id].nil?
+                        shutdown
                     end
-
-                    if @is_tunnel[id] == :tunnel then
-                        @upstream_sockets[id][0].write payload
+                else
+                    # response from origin
+                    data = sock.recv(65536)
+                    if data.bytesize == 0 then
+                        shutdown
                         next
                     end
-                    next if payload.bytesize == 0
-
-                    # request処理
-                    req = RequestHandler.new(payload)
-                    # idチェック
-                    if @upstream_sockets[id].nil? then
-                        # 新規idの場合は, 接続先ホスト, portを特定してconnection establish
-                        # Request stringからhost, portを特定
-                        up = TCPSocket.open(req.host, req.port)
-                        @descriptors.push(up)
-                        _log "Established connection to origin server\n"
-                        @upstream_sockets[id] = [up, req.host, req.port]
-                        @ids[up.__id__] = id
-                    end
-                    # 既存idの場合は@idsから使用ソケットを特定
-                    upstream_info = @upstream_sockets[id]
-                    up = upstream_info[0]
-
-                    # Request Stringのpath書き換え
-                    if upstream_info[1] != req.host || upstream_info[2] != req.port then
-                        @descriptors.delete(up)
-                        @ids.delete(up.__id__)
-                        @upstream_sockets.delete(id)
-                        up.close
-                        up = TCPSocket.open(req.host, req.port)
-                        @descriptors.push(up)
-                        @ids[up.__id__] = id
-                        @upstream_sockets[id] = [up, req.host, req.port]
-                    end
-
-                    if req.http_method =~ /CONNECT/i then
-                        # CONNECTメソッドの場合tunnel生成
-                        @is_tunnel[id] = :tunnel
-                        sock.write pack_header(
-                            "HTTP/1.1 200 connection established\r\n\r\n", id)
-                        next
-                    end
-
-                    #p req.proxy_rewrite
-                    up.write req.proxy_rewrite
-
-                else # from Origin Server
-                    _log "Received response from origin server\n"
-                    payload = sock.recv(65536)
-                    if payload.length == 0 then
-                        _log "Closed connection to origin server: #{sock}\n"
-                        unsubscribe_connection sock
-                        next
-                    end
-
-                    id = @ids[sock.__id__]
-                    if @is_tunnel[id] == :tunnel then
-                        @downstream_socket.write pack_header(payload, id)
-                        next
-                    end
-                    res = ResponseHandler.new(payload)
-                    @downstream_socket.write pack_header(res.proxy_rewrite, id)
-                end
+                    @res.parse(data)
+                    @down_sock.write pack_header(@res.rewrite, id) unless payload.bytesize == 0
+                end # case
             end # each
         end # loop
     end # run
 
     def stop
-        @descriptors.each do |s|
-            begin
-                s.shutdown
-            rescue Errno::ENOTCONN
-                @descriptors.delete(s)
-                s.close
-            end
-        end
-    end # stop
-
-    private
-
-    def graceful_close(sock)
-        if sock then
-            _log "Shutdown connection: #{@ids[sock.__id__]}\n"
-            sock.shutdown
-        end
     end
 
-    def unsubscribe_connection(sock)
-        @descriptors.delete(sock)
-        if sock == @downstream_socket then
-            @descriptors.each do |s|
-                s.shutdown
-            end
-            @descriptors.delete(sock)
-            @downstream_socket = nil
-        else
-            id = @ids[sock.__id__]
-            _log "Closing connection: #{id}\n"
-            @ids.delete(sock.__id__)
-            @is_tunnel.delete(id)
-            @upstream_sockets.delete(id)
-            # shutdown signalを送信
-            @downstream_socket.write(pack_header("", id, "\x10")) unless @downstream_socket.nil?
-        end
-        sock.close
-        exit if @descriptors.length == 0
-    end # unsubscribe_connection
-end # class NSAWorker
-
-###################
-# 起動
-###################
-processes = Array.new
-#Signal.trap("INT") do
-#    processes.each do |p|
-#        Process.kill "INT", p
-#    end
-#end
-#Signal.trap("TERM") do
-#    processes.each do |p|
-#        Process.kill "TERM", p
-#    end
-#end
-server_socket = TCPServer.open(LISTEN_PORT)
-Socket.accept_loop(server_socket) do |sock|
-    _log "Accepted new client connection from #{sock.peeraddr[2]}\n"
-    pid = fork do
-        worker = NSAServer.new(sock)
-        Signal.trap("INT") { worker.stop }
-        Signal.trap("TERM") { worker.stop }
-        worker.run
+    def shutdown
     end
-    processes.push(pid)
 end
+
+listen_sock = TCPServer.open(50000)
+Socket.accept_loop(listen_sock) do |sock|
+    fork do
+        worker = NSAWorker.new(sock)
+        worker.run
+    end # fork
+end # accept loop
