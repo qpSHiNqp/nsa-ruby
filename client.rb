@@ -11,7 +11,7 @@ require "socket"
 require "./nsa_utils"
 
 SERVER_ADDR = "localhost".freeze
-SERVER_PORT = 20000.freeze
+SERVER_PORT = 50000.freeze
 PROXY_PORT = 8080.freeze
 
 class NSAClient

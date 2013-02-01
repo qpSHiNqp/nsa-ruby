@@ -11,7 +11,7 @@ require "./request_handler"
 require "./response_handler"
 require "./nsa_utils"
 
-LISTEN_PORT = 20000.freeze
+LISTEN_PORT = 50000.freeze
 
 class NSAServer
     include NSAUtils
@@ -82,10 +82,10 @@ class NSAServer
                     end
 
                     if req.http_method =~ /CONNECT/i then
+                        _log "CONNECT method!!"
                         # CONNECTメソッドの場合tunnel生成
                         @is_tunnel[id] = :tunnel
-                        sock.write pack_header(
-                            "HTTP/1.1 200 connection established\r\n\r\n", id)
+                        sock.write pack_header("HTTP/1.1 200 connection established\r\n\r\n", id)
                         next
                     end
 
