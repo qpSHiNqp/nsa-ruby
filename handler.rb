@@ -1,4 +1,5 @@
 require 'uri'
+require 'socket'
 
 HTTP_1_0                 = 'HTTP/1.0'.freeze
 CONNECTION_REGEXP        = /^Connection:\s*([\S]+)/i.freeze
@@ -20,29 +21,11 @@ class Upstream < EM::Connection
 	def initialize(rh)
 		@request_handler = rh
 		@mode = :proxy
-		@persistent = true
+		@state = :not_connected
 	end
 
 	def post_init
-		reset_vars
-		#if $debug then
-		#	$m.synchronize{ $upstream_count += 1 }
-		#end
-	end
-
-	def reset_vars
-		@content_length = 0
-		@received = 0
-		@chunked = false
-		@chunk_received = 0
-	end
-
-	def persistent?(http_version, proxy_connection)
-		if http_version == HTTP_1_0
-			proxy_connection =~ KEEP_ALIVE_REGEXP
-		else
-			proxy_connection.nil? || proxy_connection !~ CLOSE_REGEXP
-		end
+		@state = :connected
 	end
 
 	def create_tunnel(data)
@@ -51,11 +34,10 @@ class Upstream < EM::Connection
 		@request_handler.send_data(response)
 	end
 
-	#def send_data(data)
-	#	#print "notice: about to send request through sock: #{$upstream_conn[self.object_id][0]} #{$upstream_conn[self.object_id][2]}\n"
-	#	#print data
-	#	super(data)
-	#end
+	def send_data(data)
+		p data
+		super data
+	end
 
 	def receive_data(data)
 		if @mode == :tunnel then
@@ -63,93 +45,62 @@ class Upstream < EM::Connection
 			return
 		end
 
-		chunk_end = false
-		body = ""
-
-		if @content_length == 0 && !@chunked then
+		if data.byteslice(0,10) =~ /HTTP\/1.\d\s/i then
 			# keep-alive or not
 			header, body = data.split(/\r?\n\r?\n/, 2)
-			http_version, pseudo = header.split(nil, 2)
+			http_version, _ = header.split(nil, 2)
 			CONNECTION_REGEXP =~ header
 			connection = nil
 			connection = Regexp.last_match(1) unless Regexp.last_match.nil?
 
-			# content length
-			CONTENT_LENGTH_REGEXP =~ header
-			@content_length = Regexp.last_match.nil? ? 0 : Regexp.last_match(1).to_i
-
-			# chunked?
-			TRANSFER_ENCODING_REGEXP =~ header
-			@chunked = Regexp.last_match.nil? ? false : true
-
-			# persistent?
-			@persistent = persistent?(connection, http_version)
-
 			# rewrite connection header
 			data.sub(/Connection: /i, "Proxy-Connection: ") unless connection.nil?
 			#p "Connection_persistency: %s" % @persistent
+
+			/^(.*)\r?\n/ =~ header
+			request_string = Regexp.last_match(1).strip
+			method, uri, http_version = request_string.split("\s", 3)
+			parsed_uri = URI.parse(uri)
+			data = data.sub(uri, parsed_uri.path)
 		else
 			#p "*** continued ***"
 			body = data
 		end
-		if @chunked && !body.nil? && body.bytesize != 0 then
-			chunk = body
-			while true do
-				chunk_size, message = chunk.split(/\r?\n/, 2)
-				if chunk_size.nil? || chunk_size.strip == "0" then
-					chunk_end = true
-					break
-				end
-				chunk_size = chunk_size.hex
-				#p "*** (chunk: %d bytes)" % chunk_size
-				if message.nil? || message.bytesize == 0 then
-					@chunk_received = 0
-					break
-				elsif message.bytesize >= chunk_size then
-					chunk = message.byteslice(chunk_size, message.bytesize - chunk_size)
-					@chunk_received = 0
-				else
-					@chunk_received += message.bytesize
-					break
-				end
-			end
-		end
 
 		# send back response to client
 		@request_handler.send_data(data)
-		@received += body.bytesize unless body.nil?
-
-		if (@received >= @content_length && ! @chunked) || chunk_end then
-			# connection: close
-			@request_handler.close_connection_after_writing unless @persistent
-			reset_vars
-		end
-	end
-
-	def unbind
-		@request_handler.close_connection_after_writing
-		#if $debug then
-		#	$m.synchronize{ $upstream_count -= 1 }
-		#end
 	end
 
 	def connection_completed
-		@request_handler.close_connection_after_writing
-		#if $debug then
-		#	$m.synchronize{ $upstream_count -= 1 }
-		#end
+		p "connection established to server: #{@request_handler.id}"
+	end
+
+	def unbind
+		p "unbind from server"
+		issue_shutdown_signal
+		@state = :closed
+	end
+
+	def issue_shutdown_signal
+		@request_handler.handle_shutdown_signal unless @active_close
+	end
+
+	def handle_shutdown_signal
+		@active_close = true
+		close_connection_after_writing unless @state == :closed
 	end
 end
 
 class RequestHandler < EM::Connection
+	attr_reader :id
+
 	def initialize
 		@upstream = nil
+		@host = @port = nil
+		@state = :not_connected
 	end
 
 	def post_init
-		#if $debug then
-		#	$m.synchronize{ $downstream_count += 1 }
-		#end
 	end
 
 	def receive_data(data)
@@ -172,19 +123,21 @@ class RequestHandler < EM::Connection
 			# CONNECT method
 			host, port = uri.strip.split(":", 2)
 			@upstream = EM.connect(host, port, Upstream, self)
-			#$m.synchronize { $upstream_conn[@upstream.object_id] = [host, port, :tunnel] }
-			#print "notice: upstream connection established. #{@upstream.object_id.to_s(16)}, #{host}, #{port}\n"
 			# rewrite connection header
 			data.sub(/Proxy-Connection: /i, "Connection: ") unless proxy_connection.nil?
 			# send through upstream socket
 			@upstream.create_tunnel(data)
 		else
 			# Other method
+			uri = URI.parse(uri)
 			if @upstream == nil then
-				uri = URI.parse(uri)
 				@upstream = EM.connect(uri.host, uri.port, Upstream, self)
-			#$m.synchronize { $upstream_conn[@upstream.object_id] = [uri.host, uri.port, :proxy] }
-			#print "notice: upstream connection established. #{@upstream.object_id.to_s(16)}, #{uri.host}, #{uri.port}\n"
+				@host, @port = uri.host, uri.port
+			end
+			if uri.host != @host || uri.port != @port then
+				@upstream.close_connection
+				@upstream = EM.connect(uri.host, uri.port, Upstream, self)
+				@host, @port = uri.host, uri.port
 			end
 			# rewrite connection header
 			data.sub(/Proxy-Connection: /i, "Connection: ") if proxy_connection
@@ -193,17 +146,26 @@ class RequestHandler < EM::Connection
 		end
 	end
 
-	def unbind
-		@upstream.close_connection_after_writing unless @upstream.nil?
-		#if $debug then
-		#	$m.synchronize{ $downstream_count -= 1 }
-		#end
+	def connection_completed
+		peeraddr = Socket.unpack_sockaddr_in(get_peername)
+		@id = peeraddr[1]
+		@state = :connected
+		p "connection established to browser: #{peeraddr}"
 	end
 
-	def connection_completed
-		@upstream.close_connection_after_writing unless @upstream.nil?
-		#if $debug then
-		#	$m.synchronize{ $downstream_count -= 1 }
-		#end
+	def unbind
+		p "unbind from browser"
+		issue_shutdown_signal
+		@state = :closed
+	end
+
+	def issue_shutdown_signal
+		p @upstream
+		@upstream.handle_shutdown_signal unless @active_close || @upstream.nil?
+	end
+
+	def handle_shutdown_signal
+		@active_close = true
+		close_connection_after_writing unless @state == :closed
 	end
 end
