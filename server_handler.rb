@@ -1,20 +1,19 @@
 require 'uri'
 require 'socket'
+require './nsa_utils'
 
-HTTP_1_0                 = 'HTTP/1.0'.freeze
 CONNECTION_REGEXP        = /^Connection:\s*([\S]+)/i.freeze
 PROXY_CONNECTION_REGEXP  = /^Proxy-Connection:\s([\S]+)$/i.freeze
-KEEP_ALIVE_REGEXP        = /\bkeep-alive\b/i.freeze
-CLOSE_REGEXP             = /\bclose\b/i.freeze
-CONTENT_LENGTH_REGEXP    = /^Content-Length:\s+(\d+)/i.freeze
-TRANSFER_ENCODING_REGEXP = /^Transfer-Encoding:\s*(\w+)/i.freeze
 
 class Upstream < EM::Connection
 	attr_reader :mode
+	attr_accessor :host
+	attr_accessor :port
 
 	def initialize(downstream, id)
 		@downstream = downstream
 		@id = id
+		@host, @port = nil
 		@mode = :proxy
 		@state = :not_connected
 	end
@@ -26,22 +25,17 @@ class Upstream < EM::Connection
 	def create_tunnel(data)
 		@mode = :tunnel
 		response = "HTTP/1.1 200 connection established\r\n\r\n"
-		@downstream.send_data(response, @id)
-	end
-
-	def send_data(data)
-		p data
-		super data
+		@downstream.send_data_with_id(response, @id)
 	end
 
 	def receive_data(data)
+		p "received response; data: #{data.bytesize}, sess_id: #{@id}"
 		if @mode == :tunnel then
-			@downstream.send_data(data, @id)
+			@downstream.send_data_with_id(data, @id)
 			return
 		end
 
-		if data.byteslice(0,10) =~ /HTTP\/1.\d\s/i then
-			# keep-alive or not
+		if data.byteslice(0,10) =~ /^HTTP\/1.\d\s.*/i then
 			header, body = data.split(/\r?\n\r?\n/, 2)
 			http_version, _ = header.split(nil, 2)
 			CONNECTION_REGEXP =~ header
@@ -49,35 +43,22 @@ class Upstream < EM::Connection
 			connection = Regexp.last_match(1) unless Regexp.last_match.nil?
 
 			# rewrite connection header
-			data.sub(/Connection: /i, "Proxy-Connection: ") unless connection.nil?
-			#p "Connection_persistency: %s" % @persistent
+			data.sub!(/Connection: /i, "Proxy-Connection: ") unless connection.nil?
 
 			/^(.*)\r?\n/ =~ header
 			request_string = Regexp.last_match(1).strip
 			method, uri, http_version = request_string.split("\s", 3)
 			parsed_uri = URI.parse(uri)
 			data = data.sub(uri, parsed_uri.path)
-		else
-			#p "*** continued ***"
-			body = data
 		end
 
 		# send back response to client
-		@downstream.send_data(data, @id)
-	end
-
-	def connection_completed
-		p "connection established to server: #{@request_handler.id}"
+		@downstream.send_data_with_id(data, @id)
 	end
 
 	def unbind
-		p "unbind from server"
-		issue_shutdown_signal
-		@state = :closed
-	end
-
-	def issue_shutdown_signal
 		@downstream.issue_shutdown_signal(@id) unless @active_close
+		@state = :closed
 	end
 
 	def handle_shutdown_signal
@@ -87,20 +68,22 @@ class Upstream < EM::Connection
 end
 
 class NSAServer < EM::Connection
+	include NSAUtils
+
 	def initialize
 		@upstreams = Hash.new
-		@host = @port = nil
-		@state = :not_connected
 	end
 
-	def send_data(data, id, flag = "\x00")
-		data = pack_header(data, id, flag)
-		super(data)
+	def send_data_with_id(data, id, flag="\x00")
+		packed_data = pack_header(data, id, flag)
+		p "sending back response; data: #{data.bytesize}, id: #{id}"
+		send_data(packed_data)
 	end
 
-	def receive_data(data)
-		id, flag, data = unpack_header(data)
-		@upstreams[id].handle_shutdown_signal if flag == "\x10"
+	def receive_data(packed_data)
+		id, flag, data = unpack_header(packed_data)
+		@upstreams[id].handle_shutdown_signal if flag == "\x10" && !@upstreams[id].nil?
+		return if data.bytesize == 0
 		if !@upstreams[id].nil? && @upstreams[id].mode == :tunnel then
 			@upstreams[id].send_data(data)
 			return
@@ -116,12 +99,12 @@ class NSAServer < EM::Connection
 		PROXY_CONNECTION_REGEXP =~ header
 		proxy_connection = !Regexp.last_match.nil? unless Regexp.last_match.nil?
 
-		if method == "CONNECT" then
+		if method =~ /CONNECT/i then
 			# CONNECT method
 			host, port = uri.strip.split(":", 2)
 			@upstreams[id] = EM.connect(host, port, Upstream, self, id)
 			# rewrite connection header
-			data.sub(/Proxy-Connection: /i, "Connection: ") unless proxy_connection.nil?
+			data.sub!(/Proxy-Connection: /i, "Connection: ") unless proxy_connection
 			# send through upstream socket
 			@upstreams[id].create_tunnel(data)
 		else
@@ -129,15 +112,15 @@ class NSAServer < EM::Connection
 			uri = URI.parse(uri)
 			if @upstreams[id] == nil then
 				@upstreams[id] = EM.connect(uri.host, uri.port, Upstream, self, id)
-				@host, @port = uri.host, uri.port
+				@upstreams[id].host, @upstreams[id].port = uri.host, uri.port
 			end
-			if uri.host != @host || uri.port != @port then
+			if uri.host != @upstreams[id].host || uri.port != @upstreams[id].port then
 				@upstreams[id].close_connection
 				@upstreams[id] = EM.connect(uri.host, uri.port, Upstream, self, id)
-				@host, @port = uri.host, uri.port
+				@upstreams[id].host, @upstreams[id].port = uri.host, uri.port
 			end
 			# rewrite connection header
-			data.sub(/Proxy-Connection: /i, "Connection: ") if proxy_connection
+			data.sub!(/Proxy-Connection: /i, "Connection: ") if proxy_connection
 			# send through upstream socket
 			@upstreams[id].send_data(data)
 		end
@@ -148,7 +131,6 @@ class NSAServer < EM::Connection
 	end
 
 	def issue_shutdown_signal(id)
-		p @upstreams[id]
-		send_data("", id, "\x10")
+		send_data_with_id("", id, "\x10")
 	end
 end
