@@ -9,6 +9,7 @@ class NSAClientUpstream < EM::Connection
 	end # initialize
 
 	def send_data(data, id, flag="\x00")
+		p "sending data: #{data.byteslice(0,80)}"
 		super pack_header(data, id, flag)
 	end # send_data (override)
 

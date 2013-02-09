@@ -63,6 +63,8 @@ class NSAServerDownstream < EM::Connection
 
 	def receive_data(data)
 		id, flag, data = unpack_header(data)
+		request_header = true
+		p "#{id}: #{data.byteslice(0,80)}"
 
 		@upstreams[id].handle_shutdown_signal if (flag == "\x10" && !@upstreams[id].nil?)
 		return if data.bytesize == 0
@@ -75,19 +77,23 @@ class NSAServerDownstream < EM::Connection
 		# parse request string
 		header, body = data.split("\r?\n\r?\n", 2)
 		/^(.*)\r?\n/ =~ header
-		request_string = Regexp.last_match(1).strip
-		method, uri, http_version = request_string.split("\s", 3)
+		if Regexp.last_match.nil? then
+			request_header = false
+		else
+			request_string = Regexp.last_match(1).strip
+			method, uri, http_version = request_string.split("\s", 3)
 
-		# parse connection header
-		PROXY_CONNECTION_REGEXP =~ header
-		proxy_connection = !Regexp.last_match.nil? unless Regexp.last_match.nil?
-		data.sub!(/Proxy-Connection: /i, "Connection: ") if proxy_connection
+			# parse connection header
+			PROXY_CONNECTION_REGEXP =~ header
+			proxy_connection = !Regexp.last_match.nil? unless Regexp.last_match.nil?
+			data.sub!(/Proxy-Connection: /i, "Connection: ") if proxy_connection
+		end
 
 		if method =~ /CONNECT/i then
 			host, port = uri.strip.split(":", 2)
 			@upstreams[id] = EM.connect(host, port, NSAServerUpstream, self, id)
 			@upstreams[id].create_tunnel
-		else
+		elsif request_header then
 			parsed_uri = URI.parse(uri)
 			if @upstreams[id].nil? then
 				@upstreams[id] = EM.connect(parsed_uri.host, parsed_uri.port, NSAServerUpstream, self, id)
@@ -98,6 +104,8 @@ class NSAServerDownstream < EM::Connection
 				@upstreams[id].host, @upstreams[id].port = parsed_uri.host, parsed_uri.port
 			end
 			data.sub!(uri, parsed_uri.path)
+			@upstreams[id].send_data(data)
+		else
 			@upstreams[id].send_data(data)
 		end
 	end # receive_data
