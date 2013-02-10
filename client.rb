@@ -19,7 +19,7 @@ class NSAClient
 
     def initialize(server_addr, server_port, listen_port)
         @upstream_socket = TCPSocket.open(server_addr, server_port)
-        _log "Established NSA Session to server: #{@upstream_socket.peeraddr[2]}\n"
+        #_log "Established NSA Session to server: #{@upstream_socket.peeraddr[2]}\n"
         @listen_socket = TCPServer.open(listen_port)
         @descriptors = [@upstream_socket, @listen_socket]
         @ports = Hash.new
@@ -35,29 +35,32 @@ class NSAClient
                 when @listen_socket
                     accept_new_connection
                 when @upstream_socket # NSAServerからのresponse
-                    _log "Received response from server"
                     data = sock.recv(65536)
                     reconnect(sock) if data.length == 0
                     id, flag, payload = unpack_header(data)
-                    @ids[id].write(payload) unless payload.bytesize == 0 || @ids[id].nil?
-                    graceful_close(@ids[id]) if flag == "\x10" && !@ids[id].nil?
+                    #_log "Received response from server; id: #{id}"
+                    #_log payload[0,80], "Debug"
+                    @ids[id].write(payload) unless (payload.bytesize == 0 || @ids[id].nil?)
+                    graceful_close(@ids[id]) if (flag == "\x10" && !@ids[id].nil?)
                 else # Browserからのrequest
-                    _log "Received data from browser\n"
+                    #_log "Received data from browser\n"
+                    payload = ""
                     # session id は接続元port番号
                     begin
                         payload = sock.recv(65536)
                     rescue Errno::ECONNRESET
                         unsubscribe_connection sock
                     end
-                    if payload.length == 0 then
+                    if payload.bytesize == 0 then
                         # connection is closed by the browser
                         unsubscribe_connection sock
                         next
                     end
 
-                    _log payload[0, 80], "Debug"
+                    _log payload[0, 80], "[#{sock.peeraddr[1]}]"
                     @upstream_socket.write pack_header(payload, sock.peeraddr[1])
-                    _log "sent request to server\n"
+                    #_log "sent request to server\n"
+
                 end
             end # each
         end # loop
@@ -72,8 +75,8 @@ class NSAClient
     private
 
     def unsubscribe_connection(sock)
-        id = @ports[sock]
-        _log "Closed connection to browser: #{id}\n"
+        id = @ports[sock.__id__]
+        #_log "Closed connection to browser: #{id}\n"
         if @state[id] == :half_close then
             @state.delete(id)
         else
@@ -82,12 +85,15 @@ class NSAClient
         end
         @ids.delete(id)
         @descriptors.delete(sock)
-        sock.close
+        begin
+            sock.close
+        rescue
+        end
     end
 
     def graceful_close(sock)
-        _log "closing connection"
-        id = @ports[sock]
+        #_log "closing connection"
+        id = @ports[sock.__id__]
         begin
             if @state[id] == :half_close then
                 @state.delete(id)
@@ -96,12 +102,12 @@ class NSAClient
                 @state[id] = :half_close
             end
         rescue
-            _log "Connection is already closed", "Warn"
+            #_log "Connection is already closed", "Warn"
         end
     end
 
     def reconnect(sock)
-        _log "Reconnecting to server"
+        #_log "Reconnecting to server"
         peeraddr = sock.getpeername
         host, port = peeraddr[0], peeraddr[1].to_i
         @descriptors.delete(sock)
@@ -113,12 +119,12 @@ class NSAClient
     def accept_new_connection
         newsock = @listen_socket.accept
         @descriptors.push(newsock)
-        peeraddr = newsock.getpeername
-        id = peeraddr[1].to_i
-        @ports[newsock] = id
+        peeraddr = Socket.unpack_sockaddr_in(newsock.getpeername)
+        id = peeraddr[0].to_i
+        @ports[newsock.__id__] = id
         @ids[id] = newsock
         @state[id] = :established
-        _log "accepted new connection from #{peeraddr[0]}\n"
+        #_log "accepted new connection from #{peeraddr[0]}\n"
     end # accept_new_connection
 
 end # class NSAClient
@@ -127,6 +133,6 @@ end # class NSAClient
 # startup
 #################
 worker = NSAClient.new(SERVER_ADDR, SERVER_PORT, PROXY_PORT)
-Signal.trap("INT") { worker.stop }
-Signal.trap("TERM") { worker.stop }
+#Signal.trap("INT") { worker.stop }
+#Signal.trap("TERM") { worker.stop }
 worker.run

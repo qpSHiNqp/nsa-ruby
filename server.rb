@@ -23,6 +23,8 @@ class NSAServer
         @upstream_sockets = Hash.new # idからupstream_socketを引く
         @is_tunnel = Hash.new # idからconnection modeを引く
         @state = Hash.new
+        @req = RequestHandler.new
+        @res = ResponseHandler.new
     end # initialize
 
     def run
@@ -31,11 +33,15 @@ class NSAServer
             s[0].each do |sock|
                 case sock
                 when @downstream_socket
-                    _log "Received data from client\n"
+                    _log "Received from client"
+                    #_log "Received data from client\n"
                     # dataからidとpayloadを取り出す
-                    data = sock.recv(65536)
+                    begin
+                        data = sock.recv(65536)
+                    rescue
+                    end
 
-                    if data.length == 0 then
+                    if data.bytesize == 0 then
                         # disconnected. termination process
                         _log "Downstream connection lost\n"
                         self.stop
@@ -43,6 +49,7 @@ class NSAServer
                     end
 
                     id, flag, payload = unpack_header(data)
+                    _log payload[0,80], "[#{id}]"
                     if flag == "\x10" then
                         graceful_close(@upstream_sockets[id][0]) unless @upstream_sockets[id].nil?
                     end
@@ -54,15 +61,15 @@ class NSAServer
                     next if payload.bytesize == 0
 
                     # request処理
-                    req = RequestHandler.new(payload)
+                    @req.parse(payload)
                     # idチェック
                     if @upstream_sockets[id].nil? then
                         # 新規idの場合は, 接続先ホスト, portを特定してconnection establish
                         # Request stringからhost, portを特定
-                        up = TCPSocket.open(req.host, req.port)
+                        up = TCPSocket.open(@req.host, @req.port)
                         @descriptors.push(up)
-                        _log "Established connection to origin server\n"
-                        @upstream_sockets[id] = [up, req.host, req.port]
+                        #_log "Established connection to origin server\n"
+                        @upstream_sockets[id] = [up, @req.host, @req.port]
                         @ids[up.__id__] = id
                     end
                     # 既存idの場合は@idsから使用ソケットを特定
@@ -70,19 +77,20 @@ class NSAServer
                     up = upstream_info[0]
 
                     # Request Stringのpath書き換え
-                    if upstream_info[1] != req.host || upstream_info[2] != req.port then
+                    if upstream_info[1] != @req.host || upstream_info[2] != @req.port then
                         @descriptors.delete(up)
                         @ids.delete(up.__id__)
                         @upstream_sockets.delete(id)
                         up.close
-                        up = TCPSocket.open(req.host, req.port)
+                        up = TCPSocket.open(@req.host, @req.port)
                         @descriptors.push(up)
                         @ids[up.__id__] = id
-                        @upstream_sockets[id] = [up, req.host, req.port]
+                        @upstream_sockets[id] = [up, @req.host, @req.port]
                     end
 
-                    if req.http_method =~ /CONNECT/i then
-                        _log "CONNECT method!!"
+
+                    if @req.http_method =~ /CONNECT/i then
+                        #_log "CONNECT method!!"
                         # CONNECTメソッドの場合tunnel生成
                         @is_tunnel[id] = :tunnel
                         sock.write pack_header("HTTP/1.1 200 connection established\r\n\r\n", id)
@@ -90,17 +98,19 @@ class NSAServer
                     end
 
                     #p req.proxy_rewrite
-                    up.write req.proxy_rewrite
+                    up.write @req.rewrited_request
 
                 else # from Origin Server
-                    _log "Received response from origin server\n"
+                    #_log "Received response from origin server\n"
                     begin
                         payload = sock.recv(65536)
                     rescue Errno::ECONNRESET
                         unsubscribe_connection sock
+                        next
                     end
-                    if payload.length == 0 then
-                        _log "Closed connection to origin server: #{sock}\n"
+                    #_log payload[0,80], "Debug"
+                    if payload.bytesize == 0 then
+                        #_log "Closed connection to origin server: #{sock}\n"
                         unsubscribe_connection sock
                         next
                     end
@@ -110,8 +120,8 @@ class NSAServer
                         @downstream_socket.write pack_header(payload, id)
                         next
                     end
-                    res = ResponseHandler.new(payload)
-                    @downstream_socket.write pack_header(res.proxy_rewrite, id)
+                    @res.parse(payload)
+                    @downstream_socket.write pack_header(@res.rewrited_response, id)
                 end
             end # each
         end # loop
@@ -122,7 +132,7 @@ class NSAServer
             begin
                 s.shutdown
             rescue Errno::ENOTCONN
-                _log "socket #{s} already disconnected"
+                #_log "socket #{s} already disconnected"
                 @descriptors.delete(s)
                 s.close
             end
@@ -133,7 +143,7 @@ class NSAServer
 
     def graceful_close(sock)
         if sock then
-            _log "Shutdown connection: #{@ids[sock.__id__]}\n"
+            #_log "Shutdown connection: #{@ids[sock.__id__]}\n"
             id = @ids[sock.__id__]
             if @state[id] == :half_close then
                 @state.delete(id)
@@ -141,7 +151,7 @@ class NSAServer
                 begin
                     sock.shutdown
                 rescue Errno::ENOTCONN
-                    _log "socket #{sock} already disconnected"
+                    #_log "socket #{sock} already disconnected"
                     @descriptors.delete(sock)
                     sock.close
                 end
@@ -160,7 +170,7 @@ class NSAServer
             @downstream_socket = nil
         else
             id = @ids[sock.__id__]
-            _log "Closing connection: #{id}\n"
+            #_log "Closing connection: #{id}\n"
             if @state[id] == :half_close then
                 @state.delete(id)
             else
@@ -193,11 +203,11 @@ processes = Array.new
 #end
 server_socket = TCPServer.open(LISTEN_PORT)
 Socket.accept_loop(server_socket) do |sock|
-    _log "Accepted new client connection from #{sock.peeraddr[2]}\n"
+    #_log "Accepted new client connection from #{sock.peeraddr[2]}\n"
     pid = fork do
         worker = NSAServer.new(sock)
-        Signal.trap("INT") { worker.stop }
-        Signal.trap("TERM") { worker.stop }
+#        Signal.trap("INT") { worker.stop }
+#        Signal.trap("TERM") { worker.stop }
         worker.run
     end
     processes.push(pid)

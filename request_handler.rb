@@ -14,17 +14,24 @@ class RequestHandler
     attr_reader :port
     attr_reader :path
     attr_reader :proxy_connection
+    attr_reader :rewrited_request
 
-    def initialize(request)
+    def initialize
+        @request = nil
+    end
+
+    def parse(request)
         @request = request
-        # http header/bodyの分離
-        @header, @body = @request.split(/\r?\n\r?\n/, 2)
+        @rewrited_request = @request
 
-        # Request string の解析
-        /^(.*)\r?\n/ =~ @header
-        if !Regexp.last_match.nil? then
-            @request_string = Regexp.last_match(1).strip
-            @http_method, @uri, @http_version = @request_string.split("\s", 3)
+        # Request Stringの有無の判定
+        @http_method, @uri, @http_version, _ = @request.split(/\s/, 4)
+        if @http_version =~ /HTTP\/1\.\d/i then
+            @header, @body = @request.split(/\r?\n\r?\n/, 2)
+
+            # parse connection header
+            PROXY_CONNECTION_REGEXP =~ @header
+            @proxy_connection = !Regexp.last_match.nil? unless Regexp.last_match.nil?
 
             if @http_method =~ /CONNECT/i then
                 @host, @port = @uri.split(":")
@@ -38,17 +45,12 @@ class RequestHandler
                 end
                 @host, @port = uri_parsed.host, uri_parsed.port
                 @path = uri_parsed.path
+                @rewrited_request = @request.sub!(@uri, @path)
             end
+            @rewrited_request.sub!(/Proxy-Connection: /i, "Connection: ") if @proxy_connection
+        else
+            @http_method = @uri = @http_version = nil
         end
-
-        # parse connection header
-        PROXY_CONNECTION_REGEXP =~ @header
-        @proxy_connection = !Regexp.last_match.nil? unless Regexp.last_match.nil?
-    end
-
-    def proxy_rewrite
-        tmp = @request.sub(@uri, @path)
-        tmp.sub(/Proxy-Connection: /i, "Connection: ") if @proxy_connection
-        return tmp
+        return @rewrited_request
     end
 end
