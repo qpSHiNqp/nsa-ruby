@@ -106,7 +106,7 @@ class NSAServerDownstream < EM::Connection
 			data.sub!(uri, parsed_uri.path)
 			@upstreams[id].send_data(data)
 		else
-			@upstreams[id].send_data(data)
+			@upstreams[id].send_data(data) unless @upstreams[id].nil?
 		end
 	end # receive_data
 

@@ -8,10 +8,10 @@ class NSAClientUpstream < EM::Connection
 		@downstreams = Hash.new
 	end # initialize
 
-	def send_data(data, id, flag="\x00")
-		p "sending data: #{data.byteslice(0,80)}"
-		super pack_header(data, id, flag)
-	end # send_data (override)
+#	def send_data(data, id, flag="\x00")
+#		p "sending data: #{data.byteslice(0,80)}"
+#		super (pack_header(data, id, flag))
+#	end # send_data (override)
 
 	def receive_data(data)
 		id, flag, data = unpack_header(data)
@@ -33,11 +33,13 @@ class NSAClientUpstream < EM::Connection
 	end # remove_downstream
 
 	def issue_shutdown_signal(id)
-		send_data("", id, "\x10")
+		send_data(pack_header("", id, "\x10"))
 	end # issue_shutdown_signal
 end # NSAClientUpstream
 
 class NSAClientDownstream < EM::Connection
+	include NSAUtils
+
 	def initialize(upstream)
 		@upstream = upstream
 		@state = nil
@@ -51,7 +53,8 @@ class NSAClientDownstream < EM::Connection
 	end # post_init
 
 	def receive_data(data)
-		@upstream.send_data(data, @id)
+		p "sending data: #{data.byteslice(0,80)}"
+		@upstream.send_data(pack_header(data, @id))
 	end # receive_data
 
 	def unbind
