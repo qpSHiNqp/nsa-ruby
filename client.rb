@@ -35,9 +35,15 @@ class NSAClient
                 when @listen_socket
                     accept_new_connection
                 when @upstream_socket # NSAServerからのresponse
-                    data = sock.recv(65536)
-                    reconnect(sock) if data.length == 0
-                    id, flag, payload = unpack_header(data)
+                    received = 0
+                    head = sock.recv(5)
+                    reconnect(sock) if head.length == 0
+                    id, flag, size = unpack_header(head)
+                    payload = ""
+                    begin
+                        payload += sock.recv(size - received)
+                        received += payload.bytesize
+                    end while received < size
                     #_log "Received response from server; id: #{id}"
                     #_log payload[0,80], "Debug"
                     @ids[id].write(payload) unless (payload.bytesize == 0 || @ids[id].nil?)
@@ -132,7 +138,14 @@ end # class NSAClient
 #################
 # startup
 #################
-worker = NSAClient.new(SERVER_ADDR, SERVER_PORT, PROXY_PORT)
+if ARGV.length > 0 then
+    srv_addr = ARGV[0]
+    srv_port = ARGV[1].to_i
+else
+    srv_addr = SERVER_ADDR
+    srv_port = SERVER_PORT
+end
+worker = NSAClient.new(srv_addr, srv_port, PROXY_PORT)
 #Signal.trap("INT") { worker.stop }
 #Signal.trap("TERM") { worker.stop }
 worker.run

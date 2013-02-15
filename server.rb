@@ -37,18 +37,24 @@ class NSAServer
                     #_log "Received data from client\n"
                     # dataからidとpayloadを取り出す
                     begin
-                        data = sock.recv(65536)
+                        head = sock.recv(5)
                     rescue
                     end
 
-                    if data.bytesize == 0 then
+                    if head.bytesize == 0 then
                         # disconnected. termination process
                         _log "Downstream connection lost\n"
                         self.stop
                         next
                     end
 
-                    id, flag, payload = unpack_header(data)
+                    id, flag, size = unpack_header(head)
+                    payload = ""
+                    received = 0
+                    begin
+                        payload += sock.recv(size - received)
+                        received += payload.bytesize
+                    end while received < size
                     _log payload[0,80], "[#{id}]"
                     if flag == "\x10" then
                         graceful_close(@upstream_sockets[id][0]) unless @upstream_sockets[id].nil?
@@ -66,6 +72,7 @@ class NSAServer
                     if @upstream_sockets[id].nil? then
                         # 新規idの場合は, 接続先ホスト, portを特定してconnection establish
                         # Request stringからhost, portを特定
+                        p "new upstream connection: #{@req.host}:#{@req.port}"
                         up = TCPSocket.open(@req.host, @req.port)
                         @descriptors.push(up)
                         #_log "Established connection to origin server\n"
