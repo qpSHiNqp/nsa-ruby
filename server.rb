@@ -112,7 +112,7 @@ class NSAServer
                     _log "Received response from origin server\n"
                     begin
                         payload = sock.recv(65536)
-                    rescue Errno::ECONNRESET
+                    rescue
                         unsubscribe_connection sock
                         next
                     end
