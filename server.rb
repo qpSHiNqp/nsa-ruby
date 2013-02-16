@@ -34,7 +34,6 @@ class NSAServer
                 case sock
                 when @downstream_socket
                     _log "Received from client"
-                    #_log "Received data from client\n"
                     # dataからidとpayloadを取り出す
                     begin
                         head = sock.recv(5)
@@ -75,7 +74,7 @@ class NSAServer
                         p "new upstream connection: #{@req.host}:#{@req.port}"
                         up = TCPSocket.open(@req.host, @req.port)
                         @descriptors.push(up)
-                        #_log "Established connection to origin server\n"
+                        _log "Established connection to origin server\n"
                         @upstream_sockets[id] = [up, @req.host, @req.port]
                         @ids[up.__id__] = id
                     end
@@ -108,7 +107,7 @@ class NSAServer
                     up.write @req.rewrited_request
 
                 else # from Origin Server
-                    #_log "Received response from origin server\n"
+                    _log "Received response from origin server\n"
                     begin
                         payload = sock.recv(65536)
                     rescue Errno::ECONNRESET

@@ -33,6 +33,7 @@ class NSAClient
             s[0].each do |sock|
                 case sock
                 when @listen_socket
+                    _log "incoming SYN packet"
                     accept_new_connection
                 when @upstream_socket # NSAServerからのresponse
                     received = 0
@@ -44,7 +45,7 @@ class NSAClient
                         payload += sock.recv(size - received)
                         received += payload.bytesize
                     end while received < size
-                    #_log "Received response from server; id: #{id}"
+                    _log "Received response from server; id: #{id}"
                     #_log payload[0,80], "Debug"
                     @ids[id].write(payload) unless (payload.bytesize == 0 || @ids[id].nil?)
                     graceful_close(@ids[id]) if (flag == "\x10" && !@ids[id].nil?)
@@ -130,7 +131,7 @@ class NSAClient
         @ports[newsock.__id__] = id
         @ids[id] = newsock
         @state[id] = :established
-        #_log "accepted new connection from #{peeraddr[0]}\n"
+        _log "accepted new connection from #{peeraddr[0]}\n"
     end # accept_new_connection
 
 end # class NSAClient
