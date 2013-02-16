@@ -51,9 +51,11 @@ class NSAServer
                     payload = ""
                     received = 0
                     begin
+                        _log "recv"
                         payload += sock.recv(size - received)
-                        received += payload.bytesize
+                        received = payload.bytesize
                     end while received < size
+                    _log "recv ended"
                     _log payload[0,80], "[#{id}]"
                     if flag == "\x10" then
                         graceful_close(@upstream_sockets[id][0]) unless @upstream_sockets[id].nil?

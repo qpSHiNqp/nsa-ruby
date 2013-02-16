@@ -41,9 +41,11 @@ class NSAClient
                     reconnect(sock) if head.length == 0
                     id, flag, size = unpack_header(head)
                     payload = ""
+                    _log "payload length: #{size}"
                     begin
                         payload += sock.recv(size - received)
-                        received += payload.bytesize
+                        received = payload.bytesize
+                        _log "#{received} bytes received"
                     end while received < size
                     _log "Received response from server; id: #{id}"
                     #_log payload[0,80], "Debug"
