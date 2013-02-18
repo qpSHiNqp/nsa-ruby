@@ -19,7 +19,7 @@ class NSAClient
 
     def initialize(server_addr, server_port, listen_port)
         @upstream_socket = TCPSocket.open(server_addr, server_port)
-        #_log "Established NSA Session to server: #{@upstream_socket.peeraddr[2]}\n"
+        _log "Established NSA Session to server: #{@upstream_socket.peeraddr[2]}\n"
         @listen_socket = TCPServer.open(listen_port)
         @descriptors = [@upstream_socket, @listen_socket]
         @ports = Hash.new
@@ -36,10 +36,10 @@ class NSAClient
                     _log "incoming SYN packet"
                     accept_new_connection
                 when @upstream_socket # NSAServerからのresponse
-                    received = 0
                     head = sock.recv(5)
                     reconnect(sock) if head.length == 0
                     id, flag, size = unpack_header(head)
+                    received = 0
                     payload = ""
                     _log "payload length: #{size}"
                     begin
